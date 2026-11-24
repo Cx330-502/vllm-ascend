@@ -598,6 +598,39 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
     assert topk_ids.dtype == torch.int32
 
 
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
+@pytest.mark.parametrize("use_grouped_topk", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_sigmoid_router_uses_unbiased_weights(renormalize, routed_scaling_factor, use_grouped_topk, dtype):
+    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0]], dtype=dtype)
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=2 if use_grouped_topk else None,
+        topk_group=1 if use_grouped_topk else None,
+        use_grouped_topk=use_grouped_topk,
+        renormalize=renormalize,
+        scoring_func="sigmoid",
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=torch.tensor([-0.05, 0.0, 0.8, 0.1]),
+    )
+
+    weights, ids = router._compute_routing(torch.zeros(1, 4), router_logits, indices_type=None)
+
+    # The bias makes expert 2 the highest scorer, and grouped routing restricts
+    # selection to experts 2 and 3 even though expert 0 scores above expert 3.
+    expected_ids = torch.tensor([[2, 3] if use_grouped_topk else [0, 2]])
+    expected_weights = router_logits.sigmoid().gather(-1, expected_ids)
+    if not use_grouped_topk:
+        expected_weights = expected_weights.float()
+    if renormalize:
+        expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+    sorted_ids, sort_indices = ids.sort(dim=-1)
+    torch.testing.assert_close(sorted_ids, expected_ids.to(torch.int32))
+    torch.testing.assert_close(weights.gather(-1, sort_indices), expected_weights * routed_scaling_factor)
+
+
 def _build_routing_replay_experts(router, log2phy):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     torch.nn.Module.__init__(routed_experts)

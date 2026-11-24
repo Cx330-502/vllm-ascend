@@ -15,14 +15,17 @@
 
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
+from vllm_ascend._310p.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod310
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 
 
 class TestAscendModelSlimConfig310(TestBase):
@@ -135,3 +138,39 @@ class TestAscendModelSlimConfig310(TestBase):
             method = self.ascend_config.get_quant_method(fused_moe_layer, ".moe")
             self.assertIs(method, fused_moe_method.return_value)
             fused_moe_method.assert_called_once_with(mock_scheme, fused_moe_layer.moe_config)
+
+    def test_get_quant_method_resolves_moe_checkpoint_prefix_310(self):
+        layer = MagicMock(spec=RoutedExperts)
+        layer.moe_config = MagicMock(spec=FusedMoEConfig)
+        mock_config = MagicMock()
+        mock_config.model_config.dtype = torch.float16
+        cases = (
+            ("minimax_m2", "mlp.experts", "block_sparse_moe", ("w1", "w2", "w3")),
+            ("minimax_m2", "mlp.experts.0", "block_sparse_moe", ("w1", "w2", "w3")),
+            ("minimax_m2", "block_sparse_moe.experts", "block_sparse_moe", ("w1", "w2", "w3")),
+            ("qwen3_moe", "mlp.experts", "mlp", ("gate_proj", "up_proj", "down_proj")),
+        )
+        for model_type, runtime_prefix, checkpoint_prefix, projections in cases:
+            with self.subTest(model_type=model_type, runtime_prefix=runtime_prefix):
+                mock_config.model_config.hf_config.model_type = model_type
+                config = AscendModelSlimConfig310(
+                    {
+                        f"model.layers.0.{checkpoint_prefix}.experts.0.{projection}.weight": "W8A8_DYNAMIC"
+                        for projection in projections
+                    }
+                )
+                with (
+                    patch(
+                        "vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config",
+                        return_value=mock_config,
+                    ),
+                    patch(
+                        "vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_current_vllm_config",
+                        return_value=mock_config,
+                    ),
+                    patch("vllm_ascend._310p.quantization.methods.w8a8_dynamic.get_ep_group"),
+                ):
+                    method = config.get_quant_method(layer, f"model.layers.0.{runtime_prefix}")
+
+                assert isinstance(method, AscendFusedMoEMethod)
+                self.assertIsInstance(method.quant_method, AscendW8A8DynamicFusedMoEMethod310)

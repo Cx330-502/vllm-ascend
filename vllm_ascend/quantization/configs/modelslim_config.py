@@ -702,6 +702,20 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
         return False
 
+    @staticmethod
+    def _normalize_minimax_moe_prefix(model_type: str, prefix: str) -> str:
+        if model_type not in ("minimax", "minimax_m2"):
+            return prefix
+
+        prefix = prefix.replace("mlp", "block_sparse_moe")
+        # Normalize a runtime prefix like 'experts.0' to the packed MoE prefix.
+        parts = prefix.split(".")
+        if "experts" in parts and len(parts) > 2:
+            expert_index = parts.index("experts") + 1
+            if expert_index < len(parts) and parts[expert_index].isdigit():
+                return ".".join(parts[:expert_index])
+        return prefix
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
@@ -825,17 +839,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
 
-        if model_type in ["minimax", "minimax_m2"]:
-            # Adapt to Minimax architecture: update layer names to MoE convention
-            prefix = prefix.replace("mlp", "block_sparse_moe")
-            # Normalize the prefix by stripping specific expert indices (e.g., 'experts.0' -> 'experts')
-            parts = prefix.split(".")
-            if "experts" in parts and len(parts) > 2:
-                exp_idx = parts.index("experts")
-                if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
-                    parts = parts[: exp_idx + 1]
-                    prefix = ".".join(parts)
-
+        prefix = self._normalize_minimax_moe_prefix(model_type, prefix)
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")

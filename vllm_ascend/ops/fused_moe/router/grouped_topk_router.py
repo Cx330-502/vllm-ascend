@@ -114,14 +114,18 @@ class AscendGroupedTopKRouter(BaseRouter):
             topk_weights = self._renormalize_topk_weights(topk_weights)
             return topk_weights * self.routed_scaling_factor, topk_ids
 
+        selection_scores = topk_weights
         if self.e_score_correction_bias is not None:
-            topk_weights = topk_weights + self.e_score_correction_bias
+            selection_scores = topk_weights + self.e_score_correction_bias
 
-        topk_weights, topk_ids = topk_weights.topk(self.top_k, dim=-1)
+        selected_weights, topk_ids = selection_scores.topk(self.top_k, dim=-1)
+        if self.scoring_func == "sigmoid" and self.e_score_correction_bias is not None:
+            # The correction bias affects expert selection only.
+            selected_weights = topk_weights.gather(-1, topk_ids).to(selection_scores.dtype)
 
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
-        topk_weights = self._renormalize_topk_weights(topk_weights)
+        topk_weights = self._renormalize_topk_weights(selected_weights)
         topk_weights = topk_weights * self.routed_scaling_factor
 
         return topk_weights, topk_ids
